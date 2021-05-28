@@ -39,7 +39,9 @@ vignettes/*.pdf
 .Renviron
 
 # R data
-/data/*
+/data/processed/
+/data/raw/
+/data/supporting/
 
 # R project file
 *.Rproj
