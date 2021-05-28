@@ -1,0 +1,880 @@
+---
+title: "Scott_-_Ovarian_cancer_RAD51C"
+author: "Olga Kondrashova"
+date: "March 9, 2020"
+output: 
+  html_document:
+      includes:
+        toc: true
+---
+
+
+```{r getPackageFunction, echo=FALSE, eval=TRUE, message=FALSE, warning=FALSE}
+# Load required packages
+getPackage <- function(pkg, load = TRUE, silent = TRUE, 
+                       repos = "http://cran.us.r-project.org") {
+  if(!suppressMessages(suppressWarnings(require(pkg, character.only = TRUE,
+                                                quietly = silent)))) {
+    install.packages(pkg, repos = repos, quiet = TRUE)
+    #asource("http://bioconductor.org/biocLite.R")
+    BiocManager::install(pkg)
+  }
+  if(load) 
+    suppressPackageStartupMessages(library(pkg, character.only = TRUE,
+                                           quietly = silent))
+  return("i")
+}
+
+x <- c("ComplexHeatmap", "circlize","viridis", "RColorBrewer", "tidyverse", "magrittr", "here",
+       "maftools", "data.table", "gridExtra", "eulerr", "broom", "clonevol", 
+       "MutationalPatterns","deconstructSigs", "viridis", "circlize", "scarHRD",
+       "cowplot","ggridges")
+
+invisible(lapply(x, getPackage))
+rm(x)
+```
+
+
+```{r setup000, eval=TRUE, echo=FALSE}
+# knitr global options
+knitr::opts_chunk$set(root.dir = here(), comment = NA, cache=TRUE, message = FALSE, warnings = FALSE, include = TRUE, fig.align = 'center', figcap.prefix = "Figure", figcap.sep = ":", figcap.prefix.highlight = "**", fig.path = "figures/")
+```
+
+
+```{r read_Supporting_Files, echo = FALSE, eval=FALSE}
+gene_HRD_short<-read.csv("data/supporting/181212_Pollock_HRD_list_short.csv", header = F, 
+                         stringsAsFactors = F)[,1]
+gene_BROCA_full<-read.csv("data/supporting/BROCA_v6_full.csv", header = F, stringsAsFactors = F)[,1]
+gene_BROCA_short<-read.csv("data/supporting/BROCA_v6_short.csv", header = F, stringsAsFactors = F)[,1]
+gene_Cosmic_Census<-read.csv("data/supporting/cancer_gene_census.csv", header = T, stringsAsFactors = F)[,1]
+wgs_meta<-read.table("data/supporting/Scott_WGS_metadata.tsv", header = T, stringsAsFactors = F, sep ="\t") %>%
+  select(-Tumor_Sample_Barcode) 
+# Gap reports
+array_meta_gap <- fread("data/supporting/Scott_-_Ovarian_cancer.Gap.tsv", fill = T , header = T) %>%
+  mutate(SampleLabel_T = V4, ArrayLabel_T = V5, ArrayReport_T = V6, 
+         SampleLabel_N = V7, ArrayLabel_N = V8, ArrayReport_N = V9) %>%
+  select(-starts_with("V")) %>%
+  mutate(gapAnalysisIRI = str_remove(gapAnalysisIRI,"analysis:"))
+# Raw analysis
+array_meta_basic <- fread("data/supporting/Scott_-_Ovarian_cancer.SampleArraysByStudy.tsv") %>%
+  filter(snpArrayData != "")
+
+#Chromosome order
+chr_levels=c("1","2","3","4","5","6","7","8","9","10","11",
+             "12","13","14","15","16","17","18","19","20","21",
+             "22","X")
+
+#Matched BL and PDX sample models
+matched_models <- c("PH039","134011","134013","134019","134091",
+                    "134056","134062","134183","23133","134027","134148",
+                    "134169","134143","134048")
+
+```
+
+```{r add_hr_status_to_meta, eval=FALSE}
+wgs_meta %<>%
+  mutate(HR_status = case_when(DonorLabel %in% c("PH039","134011","134013","134019","134091",
+                                                 "134056","134062","134183","23133") ~ "HR-D",
+                               DonorLabel %in% c("134036","134027","134029","134148","134111") ~ "HR-C",
+                               DonorLabel %in% c("134169","134143","134048") ~ "HR-R")) %>%
+  mutate(HR_status = factor(HR_status, levels = c("HR-D","HR-R","HR-C")))
+
+```
+
+```{r read_meta}
+# Gap reports
+array_meta_gap <- fread("data/supporting/Scott_-_Ovarian_cancer.Gap.tsv", fill = T , header = T) %>%
+  mutate(SampleLabel_T = V4, ArrayLabel_T = V5, ArrayReport_T = V6, 
+         SampleLabel_N = V7, ArrayLabel_N = V8, ArrayReport_N = V9) %>%
+  select(-starts_with("V")) %>%
+  mutate(gapAnalysisIRI = str_remove(gapAnalysisIRI,"analysis:"))
+
+# Raw analysis
+array_meta_basic <- fread("data/supporting/Scott_-_Ovarian_cancer.SampleArraysByStudy.tsv") %>%
+  filter(snpArrayData != "")
+
+#Chromosome order
+chr_levels=c("1","2","3","4","5","6","7","8","9","10","11",
+             "12","13","14","15","16","17","18","19","20","21",
+             "22","X")
+```
+
+
+# RAD51C methylation assessed by amplicons
+
+```{r load_meth_amplicon_data, message=FALSE, warning=FALSE}
+
+meth_metadata <- read_csv("data/supporting/SampleID_labels_amplicon_meth.csv")
+
+
+meth_alleles_all_df <- read_csv("data/processed/amplicon_meth/notebook_filt_no_cutoff/df_alleles_sort_all.csv") %>%
+  replace(is.na(.), 0) %>%
+  gather(key = Sample, value = Count, -allele) 
+
+```
+
+
+```{r plot_meth_ridges_subset}
+
+plot_meth_ridges <- meth_alleles_all_df %>%
+  mutate(cpg = str_count(allele, pattern = "C")) %>%
+  group_by(Sample, cpg) %>%
+  summarise(Count = sum(Count)) %>%
+  ungroup() %>%
+  group_by(Sample) %>%
+  mutate(Perc = round(Count/sum(Count)*100,2)) %>%
+  left_join(meth_metadata %>%
+              mutate(Sample = case_when(is.na(ShortLabel) ~SampleLabel,
+                                        TRUE ~ ShortLabel))) %>%
+  filter(ShortLabel != "")  %>%
+  mutate(Group = case_when(Group == "Homogeneous" ~ "Homogeneous \nmeRAD51C",
+                           Group == "Heterogeneous" ~ "Heterogeneous \nmeRAD51C",
+                           TRUE ~ Group)) %>%
+  mutate(Group = factor(Group, levels = c("Homogeneous \nmeRAD51C","Heterogeneous \nmeRAD51C"))) %>%
+  mutate(ShortLabel = factor(ShortLabel, levels = rev(unique(meth_metadata$ShortLabel)))) %>%
+  ggplot(aes(x = cpg, y = ShortLabel, height = Perc/20, alpha = .2, fill= ShortLabel)) +
+  #scale_fill_manual(values = heat.colors(18)) + 
+  scale_fill_viridis_d() + 
+  geom_ridgeline(size=0.3) + 
+  facet_grid(Group~. , scales = "free", space ="free") +
+  labs(y="",x="Number of meCpGs/epiallele") + 
+  scale_x_continuous(breaks = seq(0,13,1)) + 
+  theme_minimal(base_size = 7) + 
+  theme(legend.position = "none", 
+        axis.text.y = element_text(size = 6),
+        panel.grid = element_line(size = 0.4),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        strip.text.y = element_text(face = "bold")) 
+
+ggsave("figures/plot_meth_ridges_subset.pdf",plot_meth_ridges, height = 4, width = 5)
+
+```
+
+
+```{r plot_meth_ridges_subset_zoomed}
+
+ggsave("figures/plot_meth_ridges_subset_zoomed.pdf",
+       plot_meth_ridges + coord_cartesian(xlim=c(7,13)), 
+       height = 4, width = 5)
+```
+
+# RAD51C methylation - validation set
+
+This validation set was obtained in collaboration with Elizabeth Swisher (University of Washington). It consists of 9 patient tumours (8 with matched normal) with RAD51C methylation. These were reported in:
+Bernards, Sarah S., et al. "Clinical characteristics and outcomes of patients with BRCA1 or RAD51C methylated versus mutated ovarian carcinoma." Gynecologic oncology 148.2 (2018): 281-285.
+
+This set was analysed by Alex Dobrovic and Ksenija Nesic for RAD51C promoter methylation. To determine if methylation is homozygous or heterozygous we require RAD51C copy number status and tumour purity estimations. SNP arrays were done Katia Nones to obtain this information.
+
+We first assessed the RAD51C copy number status:
+```{r read_SNParray_genes}
+# A neat way of importing multiple files without for loops and too many variables
+CNV_array_gene <- list.files(path="data/raw/arrays/",
+                             pattern = "_genes.txt$",
+                             recursive = F,
+                             full.names = T) %>%
+  purrr::set_names(.) %>% 
+  map_dfr(~read_tsv(.,col_types = cols()), .id = "source") %>%
+  mutate(gapAnalysisIRI = str_remove(basename(source),"_genes.txt")) %>%
+  select(-c(source, SampleID)) %>%
+  left_join(array_meta_gap %>%
+              select(gapAnalysisIRI, SampleLabel_T, ArrayLabel_T), 
+            by = "gapAnalysisIRI")
+
+array_stats <- list.files(path="data/raw/arrays/",
+                          pattern = "_GAPrecognitionInfo.txt$",
+                          recursive = F,
+                          full.names = T) %>%
+  purrr::set_names(.) %>% 
+  map_dfr(~read_tsv(.,col_types = cols()), .id = "source") %>%
+  mutate(gapAnalysisIRI = str_remove(basename(source),"_GAPrecognitionInfo.txt")) %>%
+  select(-X9, -source) %>%
+  left_join(array_meta_gap %>%
+              select(gapAnalysisIRI, SampleLabel_T, ArrayLabel_T),
+            by = "gapAnalysisIRI")
+
+```
+
+```{r assess_RAD51C_CN_SNParrays}
+
+CNV_array_RAD51C <-CNV_array_gene %>%
+  filter(Symbol == "RAD51C") %>%
+  select(Symbol,Copynumber,GAP_call,SegmentDescription,SampleLabel_T) %>%
+  distinct() %>%
+  left_join(array_meta_basic %>%
+              select(sampleLabel, qpureCellularity),
+            by = c("SampleLabel_T"= "sampleLabel"))
+
+write.table(CNV_array_RAD51C,"tables/CNV_array_RAD51C.tsv", sep = "\t", row.names = F, quote = F)
+```
+
+
+
+Then we generated HRD scores for array data (using *scarHRD* package):
+
+```{r HRD_analysis_scarHRD_array, message=FALSE, warning=FALSE}
+array_seg <- list.files(path=paste0("data/raw/arrays/"),
+                      pattern = "_segments.txt$",
+                      recursive = F, full.names = T) %>%
+ purrr::set_names(.) %>%
+ map_dfr(~ read_tsv(., comment = "#"), .id = "source") %>%
+ mutate(gapAnalysisIRI = str_remove(basename(source),"_segments.txt")) %>%
+ select( -source) %>%
+ left_join(array_meta_gap %>%
+             select(gapAnalysisIRI, SampleLabel_T, ArrayLabel_T),
+           by = "gapAnalysisIRI")
+
+
+# array_seg %>%
+#   left_join(array_stats %>%
+#               select(Ploidy,gapAnalysisIRI)) %>%
+#   mutate(SampleID = paste0(SampleLabel_T,"_array"), Chromosome = paste0("chr",as.integer(Chr)), ploidy = Ploidy,
+#            Start_position = PosSNPstart, End_position = PosSNPend,
+#            total_cn = Copy, A_cn = Mallele, B_cn = Copy-Mallele) %>%
+#     filter(!Chromosome %in% c("chr24","chr25")) %>%
+#     mutate(Chromosome = if_else(Chromosome == "chr23", "chrX", Chromosome)) %>%
+#     select(SampleID, Chromosome, Start_position, End_position,
+#            total_cn, A_cn, B_cn, ploidy) %>%
+#   group_by(SampleID) %>%
+#   do(write_tsv(.,paste0("data/processed/scarHRD/",unique(.$SampleID),"_input.txt")))
+# 
+# # Run scarHRD on produced files
+# list.files(path = paste0("data/processed/scarHRD"),
+#            pattern = "_array_input.txt",
+#            recursive = F,
+#            full.names = T) %>%
+#   map(~ scar_score(seg = .,
+#                    reference = "grch37",
+#                    seqz = FALSE,
+#                    outputdir = "data/processed/scarHRD/"))
+
+# Read in scarHRD output
+scarHRD_array <- list.files(path="data/processed/scarHRD",
+                            pattern = "_array_HRDresults.txt$",
+                            full.names = T,
+                            recursive = F) %>%
+  map_dfr(read_tsv) %>%
+  dplyr::rename(sampleLabel = X1) %>%
+  mutate(sampleLabel = str_remove(sampleLabel,"_array")) %>%
+  left_join(array_meta_basic %>% 
+              select(sampleLabel, donorLabel)) %>%
+  gather(key = Event, value = Count, -c(sampleLabel, donorLabel, "HRD-sum")) %>%
+  mutate(donorLabel = factor(donorLabel, levels = c("134183", "PH039", "LS158", "LS215", 
+                                                    "LS267", "LS28", "LS376", "LS467", 
+                                                    "LS472", "LS473", "LS475"))) %>%
+  mutate(Event = case_when(Event == "HRD" ~ "HRD LOH",
+                           TRUE ~ Event))
+
+
+```
+
+```{r plot_arrays_HRDscore_stacked }
+
+# Plot by event type  
+scarHRD_array %>%
+  filter(donorLabel != "LS475") %>%
+  mutate(donorLabel = str_replace(donorLabel, "LS","LS-")) %>%
+  mutate(donorLabel = str_remove(donorLabel,"134")) %>%
+  ggplot(.) +
+  geom_bar(aes(x=donorLabel,y= Count, fill = Event), stat = "identity", position = "stack")+
+ # facet_grid(.~donorLabel, scales = "free_x", space = "free_x") + 
+  scale_fill_manual(values=c("#9ECAE1","#3182BD","#08519C")) + 
+  labs(fill="HRD Sum Score", x="") +
+  ylim(0,100)+
+    geom_hline(yintercept = 42, linetype = "dashed") +
+  theme_bw(base_size = 7) + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.5))
+
+ggsave("figures/plot_arrays_HRDscore_stacked.pdf", width = 7, height = 5)
+
+```
+
+
+The input data for this code chunk is not provided because it contains potentially identifiable information. This data can be made available upon reasonable request, and is subject to institute and ethics approval. Code is provided for illustrative purposes only.   
+  
+```{r plot_RAD51C_CN_array_PDX, eval=FALSE}
+Raw_array_PDX <- fread("data/raw/arrays/PH039-13288-T5_FinalReport.txt", skip="SNP Name") %>%
+  mutate(SampleLabel_T="PH039-13288-T5") %>%
+  bind_rows(fread("data/raw/arrays/134183-7365_FinalReport.txt", skip="SNP Name") %>%
+              mutate(SampleLabel_T="134183-7365"))
+
+plot_BAF <- Raw_array_PDX %>%
+  filter(Chr == "17") %>%
+  #filter(Position > 56700000 & Position < 56800000) %>%
+  mutate(Sample = case_when(SampleLabel_T =="134183-7365" ~ "#183",
+                            SampleLabel_T =="PH039-13288-T5" ~ "PH039")) %>%
+  ggplot() +
+  geom_point(aes(x=Position, y=`B Allele Freq`), size=0.2, alpha=0.3,shape=16) +
+  geom_vline(xintercept = 56769963,colour = "darkblue") +
+  scale_y_continuous(limits = c(0,1),breaks = seq(0,1, by = 0.5)) + 
+  labs(x="") +
+  facet_grid(.~Sample) +
+  theme_bw(base_size = 7) + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title = element_text(size=7),
+        axis.text.y = element_text(size=6))
+
+plot_logRR <- Raw_array_PDX %>%
+  filter(Chr == "17") %>%
+  #filter(Position > 56700000 & Position < 56800000) %>%
+  ggplot() +
+  geom_point(aes(x=Position, y=`Log R Ratio`), size=0.2, alpha=0.3,shape=16) +
+  geom_vline(xintercept = 56769963,colour = "darkblue") +
+  scale_y_continuous(limits = c(-1,1),breaks = seq(-1,1, by = 1)) + 
+  labs(x="") +
+  facet_grid(.~SampleLabel_T) +
+    theme_bw(base_size = 7) + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.text = element_blank(),
+        axis.title = element_text(size=7),
+        axis.text.y = element_text(size=6))
+
+plot_Copy <-array_seg %>%
+  filter(SampleLabel_T %in% c("134183-7365","PH039-13288-T5")) %>%
+  mutate(Chr = as.integer(Chr)) %>%
+  filter(Chr  == 17)  %>%
+  mutate(Copy_colour = case_when(Copy <2 ~ "red",
+                                 TRUE ~ "black")) %>%
+  ggplot() + 
+  geom_segment(aes(x=PosSNPstart,xend=PosSNPend, y=Copy, yend=Copy, colour = Copy_colour)) +
+  scale_color_manual(values = c("red"="red", "black"="black")) +
+  geom_vline(xintercept = 56769963,colour = "darkblue") +
+  scale_y_continuous(limits = c(0,4),breaks = seq(0, 4, by = 2)) + 
+  labs(x="Chr17 Position") +
+  facet_grid(.~SampleLabel_T) +
+    theme_bw(base_size = 7) + 
+  theme(strip.text = element_blank(),
+        legend.position = "none",
+        axis.title = element_text(size=7),
+        axis.text = element_text(size=6))
+
+plot_CNV_chr17_PDX <-plot_grid(plot_BAF, plot_logRR, plot_Copy, ncol=1, align='v', axis='l')
+
+save_plot("figures/plot_CNV_chr17_PDX.pdf",plot_CNV_chr17_PDX, base_height = 3,base_width = 4)
+
+```
+
+```{r array_CNV_PH039, eval=FALSE}
+
+Raw_array_PH039 <- fread("data/raw/arrays/Arrays_09_09_20_FinalReport1_PH039_15297.txt", 
+                         skip="SNP Name") %>%
+  mutate(SampleLabel_T="PH039-15297") %>%
+  bind_rows(fread("data/raw/arrays/Arrays_09_09_20_FinalReport9_PH039_15167.txt", 
+                  skip="SNP Name") %>%
+              mutate(SampleLabel_T="PH039-15167")) %>%
+  bind_rows(fread("data/raw/arrays/Arrays_09_09_20_FinalReport14_PH039_15118.txt", 
+                  skip="SNP Name") %>%
+              mutate(SampleLabel_T="PH039-15118")) %>%
+  bind_rows(fread("data/raw/arrays/Arrays_09_09_20_FinalReport16_PH039_15119.txt", 
+                  skip="SNP Name") %>%
+              mutate(SampleLabel_T="PH039-15119")) %>%
+  bind_rows(fread("data/raw/arrays/SNP_arrays_28_10_19_FinalReport8_PH039_13288.txt", 
+                  skip="SNP Name") %>%
+              mutate(SampleLabel_T="PH039-13288")) %>%
+  bind_rows(fread("data/raw/arrays/SNP_arrays_17_11_20_FinalReport10_PH039_13071.txt", 
+                  skip="SNP Name") %>%
+              mutate(SampleLabel_T="PH039-13071"))
+```
+
+
+```{r plot_CNV_PH039, eval=FALSE}
+
+plot <- Raw_array_PH039 %>%
+  filter(Chr %in% chr_levels) %>%
+  mutate(Chr = factor(Chr, levels = chr_levels)) %>%
+  mutate(Sample = str_remove(SampleLabel_T, "PH039-")) %>%
+  mutate(Sample = factor(Sample, levels = c("13288","15118","15119","13071","15167","15297"))) %>%
+  group_by(Sample) %>%
+  sample_n(size = 500000) %>%
+  ggplot() +
+  geom_point(aes(x=Position, y=`B Allele Freq`), size=0.2, alpha=0.3, shape=16) +
+  scale_y_continuous(limits = c(0,1), breaks = seq(0,1, by = 0.5)) + 
+  labs(x="") +
+  facet_grid(Sample~Chr, scales = "free_x", space = "free_x") +
+  theme_bw(base_size = 7) + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title = element_text(size=7),
+        axis.text.y = element_text(size=6))
+
+png("./figures/plot_PH039_BAF.png", width = 14, height = 4)
+
+plot
+dev.off()
+
+#ggsave(plot, "./figures/plot_PH039_BAF.pdf", width = 14, height = 4)
+
+```
+
+
+
+# RAD51C and BRCA1 methylation in ICGC data
+
+This section analyses mutation and copy number status of RAD51C methylated samples in the ICGC data.
+```{r assess_purity_ICGC_WGS}
+wgs_meta_ICGC <- read_tsv("data/supporting/AOCS_-_ICGC_ovarian_cancer_project.StudyPairedAnalysis.tsv")
+
+CNV_ICGC_WGS_summary_stats <-list.files(path="data/raw/ascat/ICGC_AOCS/summary_stats/",
+                                      pattern = ".summary.stats.tsv$",
+                                      full.names = T) %>%
+  purrr::set_names(. %>% basename()) %>% 
+  map_dfr(~read_tsv(.,col_types = cols()), .id = "name")%>%
+  mutate(Sample=str_remove(name,".summary.stats.tsv")) %>%
+  separate(Sample, into=c("donorLabel","sampleLabel"), remove = TRUE, sep="_")
+
+
+```
+
+```{r assess_RAD51C_CN_ICGC_WGS}
+
+CNV_ICGC_WGS_genes <- list.files(path="data/raw/ascat/ICGC_AOCS/genes_pc_best/",
+                                      pattern = "genes.pc.best.cn.txt$",
+                                      full.names = T) %>%
+  purrr::set_names(. %>% basename()) %>% 
+  map_dfr(~read_tsv(.,col_types = cols(.default = "c")), .id = "name") %>%
+  mutate(SampleLabel=str_remove(name,".genes.pc.best.cn.txt")) %>%
+  separate(SampleLabel, into=c("DonorLabel","SampleID"), remove = FALSE, sep="_")
+
+CNV_ICGC_WGS_RAD51C <- CNV_ICGC_WGS_genes %>%
+  filter(gene_symbol == "RAD51C") %>%
+  select(gene_symbol,Copynumber,ASCAT_call,SegmentDescription,DonorLabel) %>%
+  distinct() %>%
+  left_join(CNV_ICGC_WGS_summary_stats %>%
+              select(donorLabel, purity),
+            by = c("DonorLabel"="donorLabel"))
+
+write.table(CNV_ICGC_WGS_RAD51C,"tables/CNV_ICGC_WGS_RAD51C.tsv", sep = "\t", row.names = F, quote = F)
+```
+
+```{r load_ICGC_metadata, message=FALSE, warning=FALSE}
+
+array_meta_ICGC_basic <- read_tsv("data/supporting/AOCS_-_ICGC_ovarian_cancer_project.SampleArraysByStudy.tsv") %>%
+  filter(!is.na(snpArrayFilePath))
+
+
+HR_status_ICGC <- read_tsv("data/supporting/AOCS_-_ICGC_HR_gene_status.tsv") %>%
+  group_by(donorLabel) %>%
+  summarise(HR_Event = paste(Gene,Event, collapse="; ")) %>%
+  mutate(HR_Event = str_replace_all(HR_Event,"germline mutation","mut")) %>%
+  mutate(HR_Event = str_replace_all(HR_Event,"somatic mutation","mut")) %>%  
+  mutate(HR_Event = str_replace_all(HR_Event,"RAD51C methylation","meRAD51C")) %>%  
+  mutate(HR_Event = str_replace_all(HR_Event,"BRCA1 methylation","meBRCA1"))
+  
+  
+
+```
+
+```{r load_ICGC_array_summary_stats, message=FALSE, warning=FALSE}
+
+array_stats_ICGC <- list.files(path="data/raw/arrays/IGCG_AOCS/summary_stats/",
+                          pattern = "_GAPrecognitionInfo.txt$",
+                          recursive = F,
+                          full.names = T) %>%
+  purrr::set_names(.) %>% 
+  map_dfr(~read_tsv(.,col_types = cols()), .id = "source") %>%
+  mutate(donorLabel_sampleLabel = str_remove(basename(source),"_GAPrecognitionInfo.txt")) %>%
+  select(-X9, -source) %>%
+  separate(donorLabel_sampleLabel, into = c("donorLabel","sampleLabel"), sep="_")
+```
+
+```{r HRD_analysis_scarHRD_ICGC_array, message=FALSE, warning=FALSE}
+
+array_seg_ICGC <- list.files(path=paste0("data/raw/arrays/IGCG_AOCS/segments/"),
+                      pattern = ".txt$",
+                      recursive = F, full.names = T) %>%
+  purrr::set_names(.) %>%
+  map_dfr(~ read_tsv(., comment = "#"), .id = "source") %>%
+  mutate(donorLabel_sampleLabel = str_remove(basename(source),".txt")) %>%
+  select( -source) %>%
+  separate(donorLabel_sampleLabel, into = c("donorLabel","sampleLabel"), sep="_")
+
+# array_seg_ICGC %>%
+#   left_join(array_stats_ICGC %>%
+#               select(Ploidy,donorLabel,sampleLabel)) %>%
+#   mutate(SampleID = paste0(sampleLabel,"_array"), Chromosome = paste0("chr",as.integer(Chr)), ploidy = Ploidy,
+#            Start_position = PosSNPstart, End_position = PosSNPend,
+#            total_cn = Copy, A_cn = Mallele, B_cn = Copy-Mallele) %>%
+#     filter(!Chromosome %in% c("chr24","chr25")) %>%
+#     mutate(Chromosome = if_else(Chromosome == "chr23", "chrX", Chromosome)) %>%
+#     select(SampleID, Chromosome, Start_position, End_position,
+#            total_cn, A_cn, B_cn, ploidy) %>%
+#   group_by(SampleID) %>%
+#   do(write_tsv(.,paste0("data/processed/scarHRD/ICGC_AOCS/",unique(.$SampleID),"_input.txt")))
+# 
+# # Run scarHRD on produced files
+# list.files(path = paste0("data/processed/scarHRD/ICGC_AOCS/"),
+#            pattern = "_array_input.txt",
+#            recursive = F,
+#            full.names = T) %>%
+#   map(~ scar_score(seg = .,
+#                    reference = "grch37",
+#                    seqz = FALSE,
+#                    outputdir = "data/processed/scarHRD/ICGC_AOCS/"))
+
+# Read in scarHRD output
+scarHRD_ICGC_array <- list.files(path="data/processed/scarHRD/ICGC_AOCS/",
+                            pattern = "_array_HRDresults.txt$",
+                            full.names = T,
+                            recursive = F) %>%
+  map_dfr(read_tsv) %>%
+  dplyr::rename(sampleLabel = X1) %>%
+  mutate(sampleLabel = str_remove(sampleLabel,"_array")) %>%
+  left_join(array_meta_ICGC_basic %>% 
+              select(sampleLabel, donorLabel,sampleSubmittedWithID,sampleType)) %>%
+  gather(key = Event, value = Count, -c(sampleSubmittedWithID,sampleLabel, donorLabel,sampleType, "HRD-sum"))  %>%
+  mutate(Event = case_when(Event == "HRD" ~ "HRD LOH",
+                           TRUE ~ Event))
+
+
+```
+
+
+```{r plot_ICGC_arrays_HRDscore_stacked }
+# Plot by event type  
+scarHRD_ICGC_array %>%
+  filter(sampleType != "Cell line derived from tumour") %>%
+  left_join(HR_status_ICGC)  %>%
+  mutate(HR_Event = case_when(is.na(HR_Event) ~ "WT",
+                              TRUE ~ HR_Event)) %>%
+  group_by(sampleSubmittedWithID, HR_Event,Event) %>%
+  summarise(Count = mean(Count), `HRD-sum` = mean(`HRD-sum`)) %>%
+  ungroup() %>%
+  arrange(`HRD-sum`) %>%
+  mutate(sampleSubmittedWithID = factor(sampleSubmittedWithID, levels = unique(sampleSubmittedWithID))) %>%
+ # separate_rows(HR_Event, sep="; ") %>%
+  ggplot(.) +
+  geom_bar(aes(x=sampleSubmittedWithID, y= Count, fill = Event), stat = "identity", position = "stack") +
+  facet_grid(.~HR_Event, scales = "free_x", space = "free_x") + 
+  scale_fill_manual(values=c("#9ECAE1","#3182BD","#08519C")) + 
+  labs(fill="HRD Sum Score") +
+  ylim(0,100)+
+    geom_hline(yintercept = 42, linetype = "dashed") +
+  theme_bw(base_size = 7) + 
+  theme(strip.text.x = element_text(angle = 90),
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.5))
+
+ggsave("figures/plot_arrays_ICGC_HRDscore_stacked.pdf", width = 10, height = 5)
+
+```
+
+```{r HRD_analysis_scarHRD_ICGC_WGS, message=FALSE, warning=FALSE}
+
+CNV_ICGC_WGS <-list.files(path="data/raw/ascat/ICGC_AOCS/copynumber/",
+                     pattern = ".copynumber.ascat.tsv$", 
+                     recursive = F,
+                     full.names = T)%>%
+  purrr::set_names(.) %>%
+  map_dfr(~ read_tsv(., col_types = cols(.default = "c")), .id = "source") %>%
+  mutate(donorLabel_sampleLabel = str_remove(basename(source),".copynumber.ascat.tsv")) %>%
+  select( -source) %>%
+  separate(donorLabel_sampleLabel, into = c("donorLabel","sampleLabel"), sep="_")
+
+# Run scarHRD on the WGS data
+# CNV_ICGC_WGS %>%
+#   left_join(CNV_ICGC_WGS_summary_stats) %>%
+#   mutate(SampleID = paste0(sampleLabel,"_WGS"), Chromosome = paste0("chr",chromosome),
+#          Start_position = start, End_position = end,
+#          total_cn = tumour.total.cn, A_cn = tumour.minor.cn, B_cn = tumour.major.cn) %>%
+#   select(SampleID, Chromosome, Start_position, End_position,
+#          total_cn, A_cn, B_cn, ploidy) %>%
+#   group_by(SampleID) %>%
+#   do({
+#     write_tsv(.,paste0("data/processed/scarHRD/ICGC_AOCS/",unique(.$SampleID),"_input.txt"))
+#     scar_score(paste0("data/processed/scarHRD/ICGC_AOCS/",unique(.$SampleID),"_input.txt"), reference = "grch37" ,
+#              seqz = FALSE, outputdir = "data/processed/scarHRD/ICGC_AOCS/")
+#   })
+  
+  
+# Read in scarHRD output
+scarHRD_ICGC_WGS <- list.files(path="data/processed/scarHRD/ICGC_AOCS/",
+                            pattern = "_WGS_HRDresults.txt$",
+                            full.names = T,
+                            recursive = F) %>%
+  map_dfr(read_tsv) %>%
+  dplyr::rename(sampleLabel = X1) %>%
+  mutate(sampleLabel = str_remove(sampleLabel,"_WGS")) %>%
+  left_join(wgs_meta_ICGC %>% 
+              select(testSampleLabel, testDonorLabel,testSampleSubmittedWithID,testSampleType),
+            by=c("sampleLabel"="testSampleLabel")) %>%
+  gather(key = Event, value = Count, -c(testSampleSubmittedWithID,sampleLabel, testDonorLabel,testSampleType, "HRD-sum"))  %>%
+  mutate(Event = case_when(Event == "HRD" ~ "HRD LOH",
+                           TRUE ~ Event))
+
+
+```
+
+```{r plot_ICGC_WGS_HRDscore_stacked }
+# Plot by event type  
+scarHRD_ICGC_WGS %>%
+  dplyr::rename(sampleType=testSampleType, donorLabel = testDonorLabel, 
+                sampleSubmittedWithID = testSampleSubmittedWithID) %>%
+  filter(sampleType != "Cell line derived from tumour") %>%
+  left_join(HR_status_ICGC)  %>%
+  mutate(HR_Event = case_when(is.na(HR_Event) ~ "WT: BRCA1/2 and RAD51C",
+                              TRUE ~ HR_Event)) %>%
+  group_by(sampleSubmittedWithID, HR_Event,Event) %>%
+  summarise(Count = mean(Count), `HRD-sum` = mean(`HRD-sum`)) %>%
+  ungroup() %>%
+  arrange(`HRD-sum`) %>%
+  mutate(sampleSubmittedWithID = factor(sampleSubmittedWithID, levels = unique(sampleSubmittedWithID))) %>%
+ # separate_rows(HR_Event, sep="; ") %>%
+  ggplot(.) +
+  geom_bar(aes(x=sampleSubmittedWithID, y= Count, fill = Event), stat = "identity", position = "stack") +
+  geom_hline(yintercept = 42, linetype = "dashed") +
+  facet_grid(.~HR_Event, scales = "free_x", space = "free_x") + 
+  scale_fill_manual(values=c("#9ECAE1","#3182BD","#08519C")) + 
+  labs(fill="HRD Sum Score", x="") +
+  ylim(0,100)+
+  theme_bw(base_size = 7) + 
+  theme(strip.text.x = element_text(angle = 90),
+        axis.text.x = element_text(angle = 90, hjust = 1,vjust=0.5))
+
+ggsave("figures/plot_ICGC_WGS_HRDscore_stacked.pdf", width = 14, height = 7)
+
+```
+
+```{r compare_HRDscore_ICGC_array_vs_WGS}
+library(ggpmisc)
+
+scarHRD_ICGC_WGS %>%
+  select(`HRD-sum`,sampleLabel) %>%
+  distinct() %>%
+  dplyr::rename(HRD_sum_WGS = `HRD-sum`) %>%
+  left_join(scarHRD_ICGC_array %>% select(`HRD-sum`,sampleLabel) %>% distinct()) %>%
+  dplyr::rename(HRD_sum_array = `HRD-sum`) %>%
+  ggplot(aes(x=HRD_sum_WGS,y=HRD_sum_array)) + 
+  geom_point() + 
+  geom_smooth(method=lm) + 
+  stat_poly_eq(formula = y~x, 
+               aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")), 
+               parse = TRUE) +   
+  ylim(0,110) +
+  xlim(0,110) + 
+  labs(x="HRD Sum score - WGS data", y="HRD Sum score - SNP arrays") + 
+  theme_bw(base_size = 10)
+
+
+ggsave("figures/compare_HRDscore_ICGC_array_vs_WGS.pdf")
+```
+
+```{r plot_all_arrays_HRDscore_dotplot }
+scarHRD_ICGC_array %>%
+  filter(sampleType != "Cell line derived from tumour") %>%
+  mutate(sampleLabel = sampleSubmittedWithID, sampleGroup = "ICGC AOCS") %>%
+  select(-sampleType,-sampleSubmittedWithID) %>%
+  bind_rows(scarHRD_array) %>%
+  mutate(sampleGroup = case_when(str_detect(donorLabel,"LS") ~ "UniWash",
+                                 sampleGroup == "ICGC AOCS" ~ sampleGroup,
+                                 TRUE ~ "PDX")) %>%
+  left_join(HR_status_ICGC)  %>%
+  mutate(HR_Event = case_when(sampleGroup == "UniWash" ~ "meRAD51C",
+                              sampleGroup == "PDX" ~ "meRAD51C",
+                              is.na(HR_Event) ~ "Wild-type",
+                              TRUE ~ HR_Event)) %>%
+  mutate(HR_Event = case_when(str_detect(HR_Event,"BRCA|RAD51C mut") ~ "HRD Control",
+                              TRUE ~ HR_Event)) %>%
+  mutate(HR_Event = factor(HR_Event, levels= c("meRAD51C","HRD Control","Wild-type"))) %>%
+  mutate(sampleGroup = factor(sampleGroup, levels = c("PDX","UniWash","ICGC AOCS"))) %>%
+  group_by(donorLabel, HR_Event, Event,sampleGroup) %>%
+  summarise(Count = mean(Count), `HRD-sum` = mean(`HRD-sum`)) %>%
+  ungroup() %>%
+  arrange(`HRD-sum`) %>%
+  select(-Event,-Count) %>%
+  distinct() %>%
+    filter(donorLabel != "LS475") %>%
+  mutate(donorLabel = factor(donorLabel, levels = unique(donorLabel))) %>%
+  ggplot(aes(x=HR_Event, y= `HRD-sum`, fill=HR_Event)) +
+  geom_dotplot(binaxis = "y",binwidth = 2.5, stackdir = "center") +
+  stat_summary(fun = median, geom = "crossbar", width = 0.8, size=0.3) + 
+  facet_grid(.~sampleGroup, scales = "free_x", space = "free_x") + 
+  scale_fill_manual(values=c("meRAD51C"="#DA6C67","HRD Control"="#4F9F64","Wild-type"="#4172AB")) + 
+  ylim(0,100)+
+  labs(y="HRD sum score", fill = "", x = "") + 
+  geom_hline(yintercept = 42, linetype = "dashed") +
+  theme_bw(base_size = 10) +
+  theme(strip.text.x = element_text(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+
+ggsave("./figures/plot_all_array_HRDscore_dotpoint.pdf",useDingbats = FALSE)
+
+```
+
+```{r plot_all_arrays_HRDscore_stacked }
+scarHRD_array_all <- scarHRD_ICGC_array %>%
+  filter(sampleType != "Cell line derived from tumour") %>%
+  mutate(sampleLabel = sampleSubmittedWithID, sampleGroup = "ICGC AOCS") %>%
+  select(-sampleType,-sampleSubmittedWithID) %>%
+  bind_rows(scarHRD_array) %>%
+  mutate(sampleGroup = case_when(str_detect(donorLabel,"LS") ~ "UniWash",
+                                 sampleGroup == "ICGC AOCS" ~ sampleGroup,
+                                 TRUE ~ "PDX")) %>%
+  left_join(HR_status_ICGC)  %>%
+  mutate(HR_Event = case_when(sampleGroup == "UniWash" ~ "meRAD51C",
+                              sampleGroup == "PDX" ~ "meRAD51C",
+                              is.na(HR_Event) ~ "Wild-type",
+                              TRUE ~ HR_Event)) %>%
+  # mutate(HR_Event = case_when(str_detect(HR_Event,"BRCA|RAD51C mut") ~ "HRD Control",
+  #                             TRUE ~ HR_Event)) %>%
+  # mutate(HR_Event = factor(HR_Event, levels= c("meRAD51C","HRD Control","Wild-type"))) %>%
+  mutate(sampleGroup = factor(sampleGroup, levels = c("PDX","UniWash","ICGC AOCS"))) %>%
+  group_by(donorLabel, HR_Event, Event,sampleGroup) %>%
+  summarise(Count = mean(Count), `HRD-sum` = mean(`HRD-sum`)) %>%
+  ungroup() %>%
+  arrange(`HRD-sum`) %>%
+  mutate(donorLabel = factor(donorLabel, levels = unique(donorLabel)))  %>%
+  mutate(HR_Event = factor(HR_Event, levels = c("meRAD51C","BRCA1 mut","BRCA2 mut", 
+                                                "RAD51C mut","meBRCA1","Wild-type")))
+
+
+plot_AOCS <- scarHRD_array_all %>%
+  filter(sampleGroup == "ICGC AOCS") %>%
+  ggplot(aes(x=donorLabel, y=Count, fill=Event)) +
+  geom_bar(stat="identity", position = "stack") +
+  facet_grid(sampleGroup~HR_Event, scales = "free_x", space = "free") + 
+  scale_fill_manual(values=c("#9ECAE1","#3182BD","#08519C")) + 
+  ylim(0,100)+
+  labs(y="HRD sum score", fill = "", x = "") + 
+  geom_hline(yintercept = 42, linetype = "dashed") +
+  theme_bw() +
+  theme(strip.text.x = element_text(angle = 90),
+        axis.text.x = element_text(angle = 90, hjust=1, size=6, vjust=0.5),
+        axis.ticks.x = element_blank())
+
+plot_UniWash_PDX <- scarHRD_array_all %>%
+  filter(donorLabel != "LS475") %>%
+  mutate(donorLabel = str_replace(donorLabel, "LS","LS-")) %>%
+  mutate(donorLabel = str_remove(donorLabel,"134")) %>%
+  filter(sampleGroup %in% c("UniWash","PDX")) %>%
+  ggplot(aes(x=donorLabel, y=Count, fill=Event)) +
+  geom_bar(stat="identity", position = "stack") +
+  facet_grid(HR_Event~sampleGroup, scales = "free_x", space = "free") + 
+  scale_fill_manual(values=c("#9ECAE1","#3182BD","#08519C")) + 
+  ylim(0,100)+
+  labs(y="HRD sum score", fill = "", x = "") + 
+  geom_hline(yintercept = 42, linetype = "dashed") +
+  theme_bw() +
+  theme(strip.text.x = element_text(),
+        axis.text.x = element_text(angle = 90, hjust=1, size=6, vjust=0.5),
+        axis.ticks.x = element_blank(),
+        legend.position="none")
+
+legend <- get_legend(plot_AOCS)
+
+bottom_row <- plot_grid(plot_UniWash_PDX, legend, ncol =2, rel_widths = c(0.6,0.4))
+
+combined <- plot_grid(plot_AOCS + theme(legend.position = "none"),
+          plot_grid(plot_UniWash_PDX, legend, ncol =2, rel_widths = c(0.2,0.8)),
+          ncol = 1)
+
+
+save_plot("figures/plot_all_arrays_HRDscore_stacked.pdf",combined, base_height = 8,base_width = 10)
+```
+
+
+```{r RNAseq_plot}
+
+ICGC_AOCS_TMM <-read_csv("./data/processed/rnaseq/200417_AOCS_TMM_counts.csv")
+ICGC_metadata_RNA <- read_tsv("./data/supporting/AOCS_-_ICGC_ovarian_cancer_project_2019.StudyRnaSeqReport.tsv")
+ICGC_metadata_DNA <- read_tsv("./data/supporting/AOCS_-_ICGC_ovarian_cancer_project.StudyPairedAnalysis.tsv")
+
+# Load in RAD51C methylation data (generated by Ksenija Nesic)
+ICGC_AOCS_RAD51C_me <- read_tsv("./data/processed/meth_array/450K_RAD51C_b_values.txt") %>%
+  dplyr::rename(Probe=X1) %>%
+  gather(key=donorLabel,value=b_value, -Probe) %>%
+  mutate(donorLabel = str_replace(donorLabel,"_","-")) %>%
+  separate(donorLabel,into=c("donorLabel","sampleLabel"),sep="_",extra="merge") %>%
+  mutate(sampleLabel=str_replace_all(sampleLabel,"_","-"))
+
+# Filter RNA data by RAD51C
+ICGC_AOCS_RAD51C_RNA <- ICGC_AOCS_TMM %>%
+  dplyr::filter(X1 == "ENSG00000108384") %>%
+  gather(key=sampleLabel,value=TMM_counts,-X1) %>%
+  mutate(sampleLabel= str_replace_all(sampleLabel,"[.]","-")) %>%
+  left_join(ICGC_metadata_RNA %>%
+              dplyr::select(sampleLabel,donorLabel,SampleType, sampleDescription, sampleSubmittedWithID)) %>%
+  distinct() %>%
+  mutate(IDs = case_when(str_detect(sampleDescription,"DNA") ~ 
+                           str_replace(sampleDescription," asscociated DNA biospcimen id ",","),
+                         TRUE ~ "") ) %>%
+  mutate(IDs = str_remove(IDs,"Macrodissected sample ")) %>%
+  separate(IDs, into=c("ID_1","ID_2"), sep=",", remove=T, fill="left") %>%
+  mutate(ID_DNA_match = case_when(sampleSubmittedWithID == ID_1 ~ ID_2,
+                                  sampleSubmittedWithID == ID_2 ~ ID_1,
+                                  TRUE ~ "")) 
+
+
+plot_RNA <- ICGC_AOCS_RAD51C_RNA %>%
+  arrange(TMM_counts) %>%
+  mutate(sampleSubmittedWithID=factor(sampleSubmittedWithID, levels=unique(sampleSubmittedWithID))) %>%
+  mutate(group=case_when(donorLabel %in% c("AOCS-147","AOCS-120","AOCS-143") ~ "Homozygous",
+                         donorLabel %in% c("AOCS-106") ~ "Heterozygous",
+                         TRUE ~ "Wild-type")) %>%
+  mutate(group= factor(group, levels = c("Homozygous","Heterozygous","Wild-type"))) %>%
+  ggplot() + 
+  geom_bar(aes(x=sampleSubmittedWithID,y=log2(TMM_counts + 1), fill=group), stat="identity", width=1, colour="grey10", size=0.2) + 
+  scale_fill_manual(values=c("Homozygous"="#DA6C67","Heterozygous"="#B8C9D2","Wild-type"="#4172AB")) +
+    theme_minimal(base_size = 7) +
+  labs(x="", y="RAD51C gene expression", 
+       fill = "Predicted\nmeRAD51C status")+
+  theme(axis.text.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.x = element_blank(),
+        legend.title = element_text(face="bold"),
+        legend.text = element_text(size=6),
+        legend.key.height = unit(0.3, "cm"),
+        legend.key.width = unit(0.3,"cm"))
+
+# Because ascat has more values, decided to just plot ascat purity
+plot_purity <- CNV_ICGC_WGS_summary_stats %>%
+  left_join(ICGC_metadata_DNA %>% 
+              dplyr::select(testDonorLabel,testSampleLabel,testSampleSubmittedWithID,
+                            testSampleDescription,testSampleType, testQpureCellularity),
+            by=c("donorLabel"="testDonorLabel", "sampleLabel"="testSampleLabel")) %>%
+  dplyr::select(testSampleSubmittedWithID,purity,testQpureCellularity) %>%
+  #keep purity info only for cases where RNA and DNA specimens match
+  dplyr::filter(testSampleSubmittedWithID %in% plot_RNA$data$ID_DNA_match) %>% 
+  #add the other labels to the data so that sample numbers match in the plots
+  full_join(plot_RNA$data %>% dplyr::select(ID_DNA_match,sampleSubmittedWithID), by = c("testSampleSubmittedWithID"="ID_DNA_match")) %>%
+  # arrange them in the same order
+  mutate(sampleSubmittedWithID=factor(sampleSubmittedWithID, 
+                                      levels=levels(plot_RNA$data$sampleSubmittedWithID))) %>%
+  ggplot() + 
+  geom_tile(aes(x=sampleSubmittedWithID,y="",fill=purity*100),
+            stat="identity", size=0.2, colour="grey10") + 
+  labs(y="", x="", fill="Tumour\ncellularity") + 
+  scale_fill_gradient(low="#e7d2fa", high="#3a0866",na.value = "grey80",limits=c(40,100), 
+                      breaks=c(40,60,80,100))+
+  theme_minimal(base_size = 7) +
+  theme(axis.text.x = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank(),
+        legend.text = element_text(size=6),
+        legend.title = element_text(face="bold"),
+        legend.direction = "horizontal",
+        legend.key.height = unit(0.3, "cm"),
+        legend.key.width = unit(0.35,"cm"))
+
+
+legend_1<- get_legend(plot_RNA)
+legend_2<- get_legend(plot_purity)
+
+  
+legends <- plot_grid(legend_1,legend_2)
+
+plot_combined <-plot_grid(legends,
+                          plot_RNA + 
+                            theme(legend.position = "none"),
+                          plot_purity + 
+                            theme(legend.position = "none"), align = "v",
+         axis = 'lr', nrow = 3, rel_heights = c(0.2,0.9,0.1))
+
+
+save_plot("./figures/plot_RNA_RAD51C_with_purity.pdf",plot_combined,base_height = 4,base_width = 5)
+
+```
+
+
+
